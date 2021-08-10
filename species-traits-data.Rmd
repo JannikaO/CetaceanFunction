@@ -1,0 +1,414 @@
+---
+title: "Traits data"
+author: "Jannika"
+date: "8/8/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Cetacean trait data
+Gather all potentially relevant trait data from different databases:
+- EltonTraits1.0: Wilman et al. 2016 https://doi.org/10.6084/m9.figshare.c.3306933.v1
+- Amniote: Myhrvold et al. 2016 https://doi.org/10.6084/m9.figshare.c.3308127.v1
+- Marine Megafauna Traits data from Pimiento et al. 2020 https://doi.org/10.1126/sciadv.aay7650
+
+```{r library, message=FALSE, warning=FALSE}
+library(dplyr)
+library(car)
+library(PVR)
+library(mice)
+```
+
+#1. Upload all datasets
+Datasets were subset to only include cetaceans in excel prior to uploading to avoid big files.
+Furthermore, the sperm whale entry was edited manually to 'Physeter macrocephalus' in 2 of the datasets in excel to remove the synonym 'Physeter catodon' prior to uploading.
+
+```{r data upload}
+#upload first dataset
+amniote <- read.csv('Traits/Amniote_Cetaceans.csv')
+#list all columns and select relevant ones
+colnames(amniote)
+amniote <- amniote %>% 
+  dplyr::select(c(4:5, 8:16, 20:24, 34)) %>% 
+  #genus and species name are in 2 columns - merge them
+  tidyr::unite(species, c(genus, species)) 
+#seperate the species from genus names with a space to mimic other datasets
+amniote$species <- sub('_',' ',amniote$species)
+
+#upload second dataset
+elton <- read.csv('Traits/EltonTraits_cetaceans.csv')
+#list all columns and select relevant ones
+colnames(elton)
+elton <- elton %>% 
+  dplyr::select(c(2, 4:13, 19:21, 24)) %>% 
+  dplyr::rename(species = Scientific)
+
+#upload third dataset
+pimiento <- read.csv('Traits/Pimiento-megafauna_whales.csv')
+#list all columns and select relevant ones
+colnames(pimiento)
+pimiento <- pimiento %>% 
+  dplyr::select(c(1,6:8, 10:13, 15:24)) 
+  
+#merge datasets
+traits1 <- merge(amniote, elton, by = 'species', all.x = TRUE, all.y = TRUE)
+traits <- merge(traits1, pimiento, by = 'species', all.x = TRUE, all.y = TRUE)
+```
+
+#2. Clean dataset
+1. remove traits with species coverage of less than 50%
+2. calculate mean body mass across all 3 estimates from the different datasets and drop the original columns
+3. remove diet categories from EltonTraits1.0 that aren't applicable
+4. remove any species which aren't marine
+5. calculate habitat breadth across the 7 ocean basins and remove the 7 columns listing the presence in each ocean basin
+6. convert diel activity into a single column with 5 numerical categories (nocturnal = 1, nocturnal + twilight = 2, nocturnal + twilight + diurnal = 3, twilight + diurnal = 4, diurnal = 5) and drop the original 3 columns
+7. convert categorical varibales from Piminetos dataset into numerical categories (migration: yes = 1, no = 0; breeding_site: coastal = 0, oceanic = 1, both = 2; vertical: pelagic = 0, benthopelagic = 1, benthic = 2; diet: plankton = 0, inverts = 1, inverts/fish = 2, fish = 3, fish/higherverts = 4; feeding: filter = 0, predator = 1; group_behaviour: solitary = 0, social = 1, both = 2)
+
+```{r clean datasets}
+#1. replace empty entries and -999 entries with NA
+traits[traits == ''] <- NA
+traits[traits == '-999'] <- NA
+
+#2. check how many NAs are in each column
+#total 90 observations - remove columns with more than 50% NAs (>= 45)
+NAs <- colSums(is.na(traits))
+NAs <- as.data.frame(NAs)
+#remove columns with 50% NAs
+traits2 <- traits[, which(colMeans(!is.na(traits)) > 0.5)] #remove 4 columns
+
+#average bodymass from all 3 datasets, ignore NAs and remove original weight columns
+traits2 <- traits2 %>% 
+  dplyr::mutate(meanBodyMass = rowMeans(.[c('weight', 'BodyMass.Value', 'adult_body_mass_g')], na.rm = T)) %>% 
+  dplyr::select(-c('weight', 'BodyMass.Value', 'adult_body_mass_g')) %>% 
+#remove diet categories which do not make sense 
+  dplyr::select(-c('Diet.Vect', 'Diet.Vunk', 'Diet.Scav', 'Diet.Fruit', 'Diet.Nect', 'Diet.Seed', 'Diet.PlantO'))
+
+#remove freshwater species
+#upload marine_species_only data
+marine <- read.csv('Traits/marine_only_species.csv')
+colnames(marine)
+marine <- dplyr::rename(marine, species = ï..species)
+colnames(marine)
+#merge marine species with traits data and drop all rows that are not included in the marine species list
+traits3 <- merge(marine, traits2, by = 'species')
+
+#make habitat breadth category and drop the original ones
+traits4 <- traits3 %>% 
+  dplyr::mutate(HabitatBreadth = rowSums(.[c('Arctic', 'North.Pacific', 'South.Pacific', 'North.Atlantic', 'South.Atlantic', 'Indian', 'Southern')], na.rm = T)) %>% 
+  dplyr::select(-c('Arctic', 'North.Pacific', 'South.Pacific', 'North.Atlantic', 'South.Atlantic', 'Indian', 'Southern')) %>% 
+
+  #make diel activity category and drop the original ones
+  #nocturnal = 1, noct+twilight = 2, all = 3, diurnal + twilight = 4, diurnal = 5
+  dplyr::mutate(DielActivity = 
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 0 & Activity.Diurnal == 0, 1,
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 1 & Activity.Diurnal == 0, 2, 
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 1 & Activity.Diurnal == 1, 3,
+            if_else(Activity.Nocturnal == 0 & Activity.Crepuscular == 1 & Activity.Diurnal == 1, 4, 5))))) %>% 
+  dplyr::select(-c('Activity.Nocturnal', 'Activity.Crepuscular', 'Activity.Diurnal'))
+
+#make all categorical variables into numerical ones
+traits5 <- traits4 %>% 
+  dplyr::mutate(migration = if_else(migration == 'marine', 1, 0)) %>% 
+  dplyr::mutate(breeding_site = if_else(breeding_site == 'coastal', 0, 
+                                        if_else(breeding_site == 'oceanic', 1, 2))) %>% 
+  dplyr::mutate(vertical = if_else(vertical == 'pelagic', 0,
+                                   if_else(vertical == 'benthopelagic', 1, 2))) %>% 
+  dplyr::mutate(diet = if_else(diet == 'plankton', 0, 
+                               if_else(diet == 'inverts', 1,
+                                       if_else(diet == 'inverts/fish', 2,
+                                               if_else(diet == 'fish', 3, 4))))) %>% 
+  dplyr::mutate(feeding = if_else(feeding == 'filter-feeding', 0, 1)) %>% 
+  dplyr::mutate(group_behaviour = if_else(group_behaviour == 'solitary', 0,
+                                          if_else(group_behaviour == 'social', 1, 2)))
+
+
+```
+
+#3. Regression analysis
+Reduce multicollinearity by regressing each trait against all other traits using linear regression models.
+
+```{r trait selection}
+#reduce multicollinearity by regressing each trait against all other traits using regression
+#doesn't work if there are many NAs in the dataset thus subset for correlation by removing NAs
+traitsNA <- traits4 %>% 
+  na.omit()
+#do linear regression models of all numerical variables first (not ones I made numerical)- check if VIF is under 5 then later do under 3
+mod1 <- lm(female_maturity_d ~ litter_or_clutch_size_n + litters_or_clutches_per_y +
+           maximum_longevity_y + gestation_d + weaning_d + birth_or_hatching_weight_g +
+           longevity_y + male_maturity_d + inter_litter_or_interbirth_interval_y +
+            meanBodyMass + HabitatBreadth + DielActivity, data = traitsNA) 
+vif(mod1) #only litter size and diel activity under 3, habitat breadth under 5 all others over 5
+
+mod2 <- lm(litter_or_clutch_size_n ~ litters_or_clutches_per_y +
+           maximum_longevity_y + gestation_d + weaning_d + birth_or_hatching_weight_g +
+           longevity_y + male_maturity_d + inter_litter_or_interbirth_interval_y +
+            meanBodyMass + HabitatBreadth + DielActivity + female_maturity_d, data = traitsNA) 
+vif(mod2) #only diel activity under 3, habitat under 5
+
+mod3 <- lm(litters_or_clutches_per_y  ~ maximum_longevity_y + gestation_d + weaning_d +
+             birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n, data = traitsNA) 
+vif(mod3) #only litter size and diel activity under 3, weaning and habitat breadth under 5
+
+mod4 <- lm(maximum_longevity_y ~ gestation_d + weaning_d +
+             birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y, data = traitsNA) 
+vif(mod4) #litter size and diel activity under 3, habitat breadth under 5
+
+mod5 <- lm(gestation_d ~ weaning_d +
+             birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y, data = traitsNA) 
+vif(mod5) #litter size and diel activity and weaning under 3, habitat breadth under 5
+
+mod6 <- lm(weaning_d ~ birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d, data = traitsNA) 
+vif(mod6) #litter size and diel activity under 3, habitat breadth and gestation under 5
+
+mod7 <- lm(birth_or_hatching_weight_g ~ longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d + weaning_d, data = traitsNA) 
+vif(mod7) #litter size and diel activity under 3, bodymass and habitat breadth under 5
+
+mod8 <- lm(longevity_y ~ male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d + weaning_d +
+              birth_or_hatching_weight_g, data = traitsNA) 
+vif(mod8) #habitat breadth, diel activity, litter size under 3, gestation and weaning under 5
+
+mod9 <- lm(male_maturity_d ~
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d + weaning_d +
+              birth_or_hatching_weight_g + longevity_y, data = traitsNA) 
+vif(mod9) #habitat breadth, diel activity, litter size under 3, weaning under 5
+
+mod10 <- lm(inter_litter_or_interbirth_interval_y ~ meanBodyMass + HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d + weaning_d +
+              birth_or_hatching_weight_g + longevity_y + male_maturity_d, data = traitsNA) 
+vif(mod10) #diel activity, litter size under 3, habitat breadth under 5
+
+mod11 <- lm(meanBodyMass ~ HabitatBreadth + DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d + weaning_d +
+              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+               inter_litter_or_interbirth_interval_y, data = traitsNA) 
+vif(mod11) #diel activity, litter size under 3, habitat breadth under 5
+
+mod12 <- lm(HabitatBreadth ~ DielActivity +
+             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+              maximum_longevity_y + gestation_d + weaning_d +
+              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+               inter_litter_or_interbirth_interval_y + meanBodyMass, data = traitsNA) 
+vif(mod12) #diel activity, litter size under 3, weaning under 5
+
+mod13 <- lm(DielActivity ~ female_maturity_d + litter_or_clutch_size_n + 
+              litters_or_clutches_per_y + maximum_longevity_y + gestation_d + weaning_d +
+              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+              inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth, data = traitsNA) 
+vif(mod13) #litter_or_clutch size under 3, habitat breadth, weaning under 5
+
+#select all of the traits that were under 5 in any of the models
+traits_vif5 <- traitsNA %>% 
+  select(c('litter_or_clutch_size_n', 'DielActivity', 'HabitatBreadth', 'weaning_d', 'gestation_d', 'meanBodyMass'))
+#check again by regression
+mod_1 <- lm(litter_or_clutch_size_n ~ DielActivity + HabitatBreadth + weaning_d +
+              gestation_d + meanBodyMass, data = traits_vif5)
+vif(mod_1) #all under 3
+
+#now add the remaining traits to the regression models
+#I converted the categorical ones into numerical categories so they can also be the dependent varibable
+traitsNA2 <- traits5 %>% 
+  na.omit()
+#don't use feeding as it is correlated to diet
+cor(traitsNA2$diet, traitsNA2$feeding) #0.79
+mod.1 <- lm(litter_or_clutch_size_n ~ DielActivity + HabitatBreadth + weaning_d +
+              gestation_d + meanBodyMass + breeding_site + migration + vertical + 
+              diet + group_behaviour, data = traitsNA2)
+vif(mod.1) #weaining and group_behaviour OVER 3
+
+mod.2 <- lm(DielActivity ~ HabitatBreadth + weaning_d +
+              gestation_d + meanBodyMass + breeding_site + migration + vertical + 
+              diet + group_behaviour + litter_or_clutch_size_n, data = traitsNA2)
+vif(mod.2) #weaning and group_behaviour OVER 3
+
+mod.3 <- lm(HabitatBreadth ~ weaning_d + gestation_d + meanBodyMass + breeding_site + 
+              migration + vertical + diet + group_behaviour + 
+              litter_or_clutch_size_n + DielActivity, data = traitsNA2)
+vif(mod.3) #weaning and group_behaviour OVER 3
+
+mod.4 <- lm(weaning_d ~ gestation_d + meanBodyMass + breeding_site + 
+              migration + vertical + diet + group_behaviour + 
+              litter_or_clutch_size_n + DielActivity + HabitatBreadth, data = traitsNA2)
+vif(mod.4) #group_behaviour OVER 3 
+
+mod.5 <- lm(gestation_d ~ meanBodyMass + breeding_site + migration + vertical + 
+              diet + group_behaviour + litter_or_clutch_size_n + DielActivity + 
+              HabitatBreadth + weaning_d, data = traitsNA2)
+vif(mod.5) #group_behaviour and weaning OVER 3
+
+mod.6 <- lm(meanBodyMass ~ breeding_site + migration + vertical + 
+              diet + group_behaviour + litter_or_clutch_size_n + DielActivity + 
+              HabitatBreadth + weaning_d + gestation_d, data = traitsNA2)
+vif(mod.6) #group_behaviour and weaning OVER 3
+
+mod.7 <- lm(breeding_site ~ migration + vertical + diet + group_behaviour + 
+              litter_or_clutch_size_n + DielActivity + HabitatBreadth + 
+              weaning_d + gestation_d + meanBodyMass, data = traitsNA2)
+vif(mod.7) #group_behaviour and weaning OVER 3
+
+mod.8 <- lm(migration ~ vertical + diet + group_behaviour + 
+              litter_or_clutch_size_n + DielActivity + HabitatBreadth + 
+              weaning_d + gestation_d + meanBodyMass + breeding_site, data = traitsNA2)
+vif(mod.8) #group_behaviour and weaning OVER 3
+
+mod.9 <- lm(vertical ~ diet + group_behaviour + 
+              litter_or_clutch_size_n + DielActivity + HabitatBreadth + 
+              weaning_d + gestation_d + meanBodyMass + breeding_site + migration, data = traitsNA2)
+vif(mod.9) #group_behaviour and weaning OVER 3
+
+mod.10 <- lm(diet ~ group_behaviour + litter_or_clutch_size_n + DielActivity + 
+               HabitatBreadth + weaning_d + gestation_d + meanBodyMass + 
+               breeding_site + migration + vertical, data = traitsNA2)
+vif(mod.10) #group_behaviour and weaning OVER 3
+
+mod.11 <- lm(group_behaviour ~ litter_or_clutch_size_n + DielActivity + 
+               HabitatBreadth + weaning_d + gestation_d + meanBodyMass + 
+               breeding_site + migration + vertical + diet, data = traitsNA2)
+vif(mod.11) #weaning OVER 3
+
+#remove weaning and group behaviour!
+traits_vif3 <- traitsNA2 %>% 
+  select(c('litter_or_clutch_size_n', 'DielActivity', 'HabitatBreadth', 'gestation_d',
+           'meanBodyMass', 'breeding_site', 'migration', 'vertical', 'diet'))
+
+mod_2 <- lm(litter_or_clutch_size_n ~ DielActivity + HabitatBreadth + gestation_d + 
+                meanBodyMass + breeding_site + migration + vertical + diet, data = traits_vif3)
+vif(mod_2)
+#all under 3
+```
+
+#subset trait data
+Subset trait dataset according to the results from the regression analysis and save these.
+
+```{r trait subset}
+#generate final list with traits to use for further analysis and save the files as .csv
+traits_final <- traits5 %>% 
+  select(c('species', 'litter_or_clutch_size_n', 'gestation_d', 'DielActivity', 'HabitatBreadth',
+           'meanBodyMass', 'breeding_site', 'migration', 'vertical', 'diet')) %>% 
+  rename(LitterSize_n = litter_or_clutch_size_n)
+write.csv(traits_final, 'Traits/traits.csv')
+#traits_final <- read.csv('Traits/traits.csv')
+
+#make a file for family and species
+family <- traits5 %>% 
+  select(c('species', 'family'))
+
+write.csv(family, 'Traits/family.csv')
+#make an iucn file
+iucn <- traits5 %>% 
+  select(c('species', 'IUCN'))
+
+write.csv(iucn, 'Traits/iucn.csv')
+
+```
+
+##Trait imputation
+Following method from Cooke et al. 2019 https://doi.org/10.1038/s41467-019-10284-z
+
+#1. Upload trait data
+
+```{r trait setup}
+#set up trait data
+trait <- read.csv('Traits/traits.csv')
+trait <- trait %>% 
+  dplyr::select(-X)
+
+family <- read.csv('Traits/family.csv')
+family <- family %>% 
+  dplyr::select(-X)
+
+tr <- trait %>% 
+  # add class data
+  dplyr::left_join(family, by = "species")
+```
+
+#2. Upload phylogenetic data
+phylogentic tree cetacean subset from MammalTree obtained from http://vertlife.org/phylosubsets/ (Upham et al 2019 'Inferring the mammal tree: Species-level sets of phylogenies for questions in ecology, evolution, and conservation.')
+
+```{r phylogenetic tree}
+# phylogenetic data
+ceta_tree <- read.nexus('~/Sussex/thesis/Traits data/CetaceaTree/output.nex')
+class(ceta_tree)
+#computes the maximum clade credibility tree from a sample of trees
+tree <- phangorn::maxCladeCred(ceta_tree)
+PVR <- PVRdecomp(tree)
+#select out species names in the order of the phylo trees
+species <- PVR@phylo$tip.label
+species <- as.data.frame(species)
+#change species names
+species$species <- sub("_", " ", species$species)
+#make a dataframe with the phylogenetic eigenvectors and select the first 10 
+eigen <- as.data.frame(PVR@Eigen$vectors)
+eigen10 <- eigen %>% 
+  select('c1':'c10')
+#combine phylogenetic eigenvectors to species names and rename column names
+pem <- cbind(species, eigen10)
+oldnames <- c('c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'c7', 'c8', 'c9', 'c10')
+newnames <- c('V_1', 'V_2', 'V_3', 'V_4', 'V_5', 'V_6', 'V_7', 'V_8', 'V_9', 'V_10')
+pem <- pem %>% 
+  rename_at(vars(oldnames), ~ newnames)
+
+#save phylogenetic eigenvectors dataframe
+saveRDS(pem, 'Traits/pem_cetaceans.Rds')
+pem <- readRDS('Traits/pem_cetaceans.Rds')
+```
+
+
+```{r imputation}
+#sort both data tables by binomial alphabetically
+tr_sort <- tr[order(tr[,'species']), ]
+pem_sort <- pem[order(pem[, 'species']),]
+# join trait and phylogenetic data
+tr_ceta <- dplyr::left_join(tr_sort, pem_sort, by = c('species'))
+
+#change dataframe to get rid off errors - try making the variables more similar...
+tr_ceta1 <- tr_ceta %>% 
+  dplyr::mutate(meanBodyMass = meanBodyMass/1000000)
+
+# missing data pattern
+mice::md.pattern(dplyr::select(tr_ceta1, -species, -family, -c(V_1:V_10)))
+
+# run multiple imputation
+tr_mi_raw <- mice(tr_ceta1, m = 25, maxit = 100, seed = 20)
+# method = pmm predictive mean matching
+
+# summary of multiple imputation results including predictor matrix (which variables were used to predict missing values)
+summary(tr_mi_raw)
+
+# save: tr_mi_raw
+saveRDS(tr_mi_raw, 'Traits/tr_mi_raw.rds')
+# dataframe of raw multiple imputated trait data for mammals (data.frame)
+
+tr_mi <- lapply(1:25, function(x) {
+  out <- mice::complete(tr_mi_raw, action = x) %>% 
+    dplyr::select(species:diet, -family) 
+})
+
+# save: tr_mi
+saveRDS(tr_mi, 'Traits/tr_mi.rds')
+
+```
+
+

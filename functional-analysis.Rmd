@@ -1,0 +1,659 @@
+---
+title: "Functional Analysis"
+author: "Jannika"
+date: "7/30/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Functional Analysis
+
+```{r libraries}
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(data.table, dplyr, tidyverse, tibble, raster, sp, stars, sf, fossil, FD, multirich, matrixStats, ggplot2, ggspatial, myplot)
+#input functions - file needs to be saved in the same folder as this Rmd
+source('functional-analysis-functions.R')
+```
+
+
+#1. Assign Ecoregions
+
+```{r ecoregions}
+#load species data - output from species-distributions.Rmd
+whales_raster <- readRDS('pres_rasterstack.Rds')
+
+#make empty list for rasters
+whales_shapefiles <- list()
+#extract each raster and extend or crop extent accordingly
+#this takes some time...once done save and load rather than redoing this bit every time...
+for(i in 1:length(whales_raster@layers)){
+  whales_shapefiles[[i]] <- sf::as_Spatial(sf::st_as_sf(stars::st_as_stars(whales_raster[[i]]),
+                                                 as_points = FALSE, merge = TRUE)) 
+}
+
+saveRDS(whales_shapefiles, file = 'whales_shapefiles_list.Rds')
+#whales_shapefiles <- readRDS('whales_shapefiles_list.Rds')
+
+#Marine Ecoregions of the World (MEOW) obtained from:
+#www.worldwildlife.org/publications/marine-ecoregions-of-the-world-a-bioregionalization-of-coastal-and-shelf-areas
+MEOW <- shapefile('~/Sussex/thesis/MarineRegions/meow_ecos.shp')
+
+#convert sptialpolygondataframe into sf object
+MEOW <- st_as_sf(MEOW)
+#create empty list and dataframe to fill with loop
+MEOW_list <- list()
+MEOW_DF <- data.frame()
+
+sf::sf_use_s2(FALSE)
+
+for(i in 1:length(whales_shapefiles)) {
+  #make temporary sf object with first whale
+  sf_temp <- st_as_sf(whales_shapefiles[[i]])
+  #join ecoregion and first whale sf objects
+  MEOW_temp <- st_join(MEOW, sf_temp)
+  #add to list and convert to dataframe
+  MEOW_list[[i]] <- MEOW_temp
+  #select columm of ecoregion name and species
+  MEOW_DF_temp <- as.data.frame(MEOW_temp[c(2,10)])
+  row.names(MEOW_DF_temp) <- NULL
+  MEOW_DF_temp$geometry <- NULL
+  species <- colnames(MEOW_DF_temp)[2]
+  colnames(MEOW_DF_temp)[2] <- "Species"
+  MEOW_DF_temp <- gather(MEOW_DF_temp, Species, Measurment, Species)
+  MEOW_DF_temp$Species <- species
+  MEOW_DF <- rbind(MEOW_DF, MEOW_DF_temp)
+  print(i) #print progress in console
+}
+#select only presence 
+MEOW_DF <- MEOW_DF %>% filter(Measurment == 1) %>% unique()
+
+write.csv(MEOW_DF, 'FctTradeoffs/species_MEOW.csv')
+#MEOW_DF <- read.csv('FctTradeoffs/species_MEOW.csv')
+
+#calculate species richness per ecoregion
+eco_SR <- MEOW_DF %>% group_by(ECOREGION) %>% summarise(SR = sum(Measurment))
+
+MEOW_with_SR <- merge(MEOW, eco_SR, by = "ECOREGION", all.x = TRUE)
+saveRDS(MEOW_with_SR, 'FctTradeoffs/MEOW_with_SR.Rds')
+
+#ggplot(data = MEOW_with_SR, aes(fill = SR)) +
+#  geom_sf() +
+#  scale_fill_viridis_b()
+
+```
+
+#2. Input ecoregion and traits data
+
+```{r pressure}
+# load ecoregion data
+
+eco <- read.csv('FctTradeoffs/species_MEOW.csv')
+
+eco <- eco %>% 
+  select(c(ECOREGION, Species)) %>% 
+  rename(eco = ECOREGION,
+         species = Species)
+
+eco$species <- sub('_',' ',eco$species)
+
+saveRDS(eco, 'FctTradeoffs/eco_MEOW.Rds')
+#eco <- readRDS('FctTradeoffs/eco_MEOW.Rds')
+
+#load trait data
+tr_mi <- readRDS('Traits/tr_mi.rds')
+#check normality of continous traits
+tr3 <- tr_mi[[3]] %>% 
+  select(-species)
+hist(tr3$LitterSize_n) #continuous
+hist(log10(tr3$LitterSize_n)) #still very skeweed as most are  less than 1
+hist(sqrt(tr3$LitterSize_n)) #still same - leave be
+
+hist(tr3$gestation_d) #continuous
+hist(log10(tr3$gestation_d)) #perhaps a little better ?
+lines(density(log10(tr3$gestation_d)), col = 2)
+hist(sqrt(tr3$gestation_d)) #best
+lines(density(sqrt(tr3$gestation_d)), col = 2)
+
+hist(tr3$meanBodyMass) #continuous
+hist(log10(tr3$meanBodyMass))
+lines(density(log10(tr3$meanBodyMass)), col = 2)
+
+#randomly select one of the 25 imputated datasets
+td_mi <- tr_mi[[3]] %>% 
+  #remove traits so I am only left with the 5 I want!
+  dplyr::select(-LitterSize_n, -breeding_site, -vertical, -DielActivity) %>% 
+  dplyr::mutate_at(vars(meanBodyMass), log10) %>% 
+  # log10-transform specified traits (body mass, litter size, generation length)
+  dplyr::mutate(gestation = sqrt(gestation_d))
+# square-root transform habitat breadth
+
+#### Check loaded data ####
+
+# species not found in any ecoregion
+no_eco <- setdiff(td_mi$species, eco$species)
+# Sousa chinensis - no aquamap for it thus can't assign ecoregion
+
+# remove missing ecoregion species from trait data
+td_mi <- td_mi %>% 
+  filter(!species %in% no_eco)
+
+#for future scenario remove extinct species from eco
+eco <- eco %>% 
+  filter(!species %in% no_species)
+
+# test if the site and trait data sets contain the same number of species? 
+isTRUE(nrow(td_mi) == nrow(distinct(eco, species))) 
+# should be TRUE
+
+saveRDS(td_mi, 'FctTradeoffs/td_mi-5.Rds')
+```
+
+#3. 
+
+```{r site data}
+# create speciesxsite matrix
+eco_mi_m <- t(create.matrix(as.data.frame(eco), tax.name = "species", locality = "eco"))
+
+# add species pool
+eco_mi_m_pool <- rbind(matrix(1, nrow = 1, ncol = ncol(eco_mi_m), 
+                              dimnames = list(c("pool"), c(colnames(eco_mi_m)))), eco_mi_m)
+
+# add pool as a site with every species present
+
+# number of ecoregions assessed
+e_mi <- dim(eco_mi_m)[1]
+e_mi_pool <- e_mi+1
+```
+
+Z-transform trait data and bin continuous traits
+
+```{r trait data transformation}
+# function to z-transform data
+scale_z <- function(x){
+  (x - mean(x, na.rm=TRUE))/sd(x, na.rm=TRUE)
+}
+
+## td_mi_z ##
+
+# z-transform trait data
+td_mi_z <- td_mi %>%
+  mutate_at(vars(-species), scale_z) %>% 
+  # scale (zero mean and unit variance) all traits
+  as.data.frame %>% 
+  # convert to true dataframe ato prevent 'Warning message: Setting row names on a tibble is deprecated.'
+  column_to_rownames(var = "species")
+  # add species names to rownames (needed for gd function)
+
+saveRDS(td_mi_z, 'FctTradeoffs/td_mi_z-5traits.Rds')
+#td_mi_z <- readRDS('FctTradeoffs/td_mi_z.Rds')
+
+# combine td_mi and eco_rm data
+ts_mi <- list(td_mi_z, eco_mi_m_pool); names(ts_mi) <- c("td_mi","eco_mi")
+
+# calculate gower species x species distance matrix based on traits
+gd_mi <- gowdis(ts_mi$td_mi)
+
+# function to bin data using sturges algorithm
+cut_bin_stur <- function(x) {
+  h <- hist(x, breaks = "Sturges")
+  as.numeric(cut(x, breaks = h$breaks))
+}
+
+# bin data using sturges algorithm as the number of bins
+tb_stur_mi <- td_mi %>% 
+  mutate_at(vars(meanBodyMass, gestation_d), funs(cut_bin_stur)) %>% 
+  # bin data
+  as.data.frame %>% 
+  # convert to true dataframe to prevent 'Warning message: Setting row names on a tibble is deprecated.'
+  column_to_rownames(var = "species") 
+  # convert species names to rownames
+
+saveRDS(tb_stur_mi, 'FctTradeoffs/tb_stur_mi-5traits.Rds')
+```
+
+#4. Functional dispersion
+
+```{r}
+# calculate functional dispersion
+fd_mi <- fdisp(gd_mi, ts_mi$eco_mi)
+
+# modify functional dispersion output
+fd_mi <- as.data.frame(fd_mi$FDis) %>%
+  # extract data and convert to dataframe
+  rownames_to_column("eco") %>% 
+  # convert ecoregions to explicit column
+  dplyr::rename(fdisp = `fd_mi$FDis`)
+  # rename FDis column
+
+saveRDS(fd_mi, "FctTradeoffs/fd_mi-5traits.rds")
+```
+
+#5. Functional redundancy
+
+```{r fred}
+# run fr_utc function
+fr_mi <- fun_met(tdf = tb_stur_mi, em = eco_mi_m_pool, fd = fd_mi, e = e_mi_pool, name = "mi")
+
+saveRDS(fr_mi, 'FctTradeoffs/MEOW_fr_mi-5traits.Rds')
+
+mean(fr_mi$spp/fr_mi$utc) #1.067 for 5 traits
+```
+
+```{r}
+colnames(fr_mi)[1] <- 'ECOREGION'
+
+MEOW_with_SR <- readRDS('FctTradeoffs/MEOW_with_SR.Rds')
+
+FR_MEOW_5 <- merge(MEOW_with_SR, fr_mi, by = "ECOREGION", all.x = TRUE)
+
+saveRDS(FR_MEOW_5, 'FctTradeoffs/MEOW_FRed-5traits.Rds')
+#FR_MEOW_5 <- readRDS('FctTradeoffs/MEOW_FRed-5traits.Rds')
+```
+
+##Null models
+#1. upload all relevant data
+```{r}
+#upload data from functional-tradeoffs.R script
+eco <- readRDS('FctTradeoffs/eco_MEOW.Rds')
+#traits data from a single randomly selected imputation (3)
+td_mi <- readRDS('FctTradeoffs/td_mi_5traits.Rds')
+#z-transformed traits data
+td_mi_z <- readRDS('FctTradeoffs/td_mi_z-5traits.Rds')
+#binned traits data
+tb_stur_mi <- readRDS('FctTradeoffs/tb_stur_mi-5traits.Rds')
+```
+
+#2. run null model
+```{r random sample}
+#1. get randomized species sample per ecoregion
+# dataframe of global species trait data
+spp <- td_mi %>%
+  # scale (zero mean and unit variance) all traits
+  mutate_at(vars(-species), scale_z) %>% 
+  as.data.frame 
+
+# dataframe of species richness per ecoregion
+eco_spp <- table(eco$eco) %>% 
+  # species richness per ecoregion
+  as.data.frame %>% 
+  # convert table to dataframe
+  dplyr::rename(eco = Var1, spp = Freq)
+# rename columns
+
+# number of permutations to run
+npermute <- 999
+
+spp_eco <- replicate(
+  npermute,
+  eco_spp %>%
+    dplyr::group_by(eco) %>%
+    # nest columns within dataframe
+    tidyr::nest() %>%
+    # sample number of species equivalent to species richness
+    dplyr::mutate(spp_list = purrr::map(data, ~ dplyr::sample_n(spp, .$spp))) %>%
+    # unnest - turn data back into dataframe
+    tidyr::unnest(cols = c(data, spp_list)),
+  simplify = FALSE
+)
+
+#2. use existing code to calculate functional redundancy and functional dispersion for each randomized community
+null <- list()
+
+for(i in 1:length(spp_eco)){
+eco_mi_m_spp <- t(create.matrix(as.data.frame(spp_eco[[i]]), tax.name = 'species', locality = 'eco'))
+
+eco_mi_m_pool_spp <- rbind(matrix(1, nrow = 1, ncol = ncol(eco_mi_m_spp), 
+                                  dimnames = list(c("pool"), c(colnames(eco_mi_m_spp)))), eco_mi_m_spp)
+
+e_mi_spp <- dim(eco_mi_m_spp)[1]
+
+e_mi_pool_spp <- e_mi_spp+1
+
+ts_mi_spp <- list(td_mi_z, eco_mi_m_pool_spp); names(ts_mi_spp) <- c("td_mi","eco_mi")
+
+gd_mi_spp <- gowdis(ts_mi_spp$td_mi)
+
+fd_mi_spp <- fdisp(gd_mi_spp, ts_mi_spp$eco_mi)
+
+# modify functional dispersion output
+fd_mi_spp <- as.data.frame(fd_mi_spp$FDis) %>%
+  # extract data and convert to dataframe
+  rownames_to_column("eco") %>% 
+  # convert ecoregions to explicit column
+  dplyr::rename(fdisp = `fd_mi_spp$FDis`)
+
+fr_mi_spp <- fun_met(tdf = tb_stur_mi, em = eco_mi_m_pool_spp, fd = fd_mi_spp, e = e_mi_pool_spp, name = "mi")
+
+null[[i]] <- fr_mi_spp
+
+}
+#3. summarise the null model runs with the mean and standard deviation 
+
+null_data <- rbindlist(null)
+saveRDS(null_data, '~/R/thesis/FctTradeoffs/null_data_unlisted.Rds')
+#null_data <- readRDS('~/R/thesis/FctTradeoffs/null_data_unlisted.Rds')
+#unlist the dataframes into one giant dataframe
+null_df <- null %>% 
+  reduce(inner_join, by = 'eco')
+
+#subset the dataframe for fdisp and calculate the mean fdisp per ecoregion
+null_fdisp <- null_df %>% 
+  select('eco', starts_with('fdisp')) %>% 
+  mutate(fdisp_null = rowMeans(.[c(-1)])) %>% 
+  mutate(fdisp_sd = rowSds(as.matrix(.[,c(-1)]))) %>% 
+  select('eco', 'fdisp_null', 'fdisp_sd')
+
+#subset the dataframe for fred and calculate the mean fred per ecoregion
+null_fred <- null_df %>% 
+  select('eco', starts_with('fred')) %>% 
+  mutate(fred_null = rowMeans(.[c(-1)])) %>% 
+  mutate(fred_sd = rowSds(as.matrix(.[,c(-1)]))) %>% 
+  select('eco', 'fred_null', 'fred_sd')
+
+#merge null model values into a single dataframe
+Fnull <-  merge(null_fred, null_fdisp, by = 'eco', all.x = TRUE, all.y = TRUE)
+saveRDS(Fnull, 'FctTradeoffs/Fnull_MEOW-5traits_df.Rds')
+```
+
+#3. calculate the Standardized Effect Size (SES)
+SES = [Fobs - mean(Fnull)]/SD(Fnull)
+
+```{r SES}
+# functions for SES per ecoregion
+SES_fred <- function(x){
+  (x - null_fred$fred_null)/null_fred$fred_sd
+}
+
+SES_fdisp <- function(x){
+  (x - null_fdisp$fdisp_null)/null_fdisp$fdisp_sd
+}
+
+#input observed funct metrics
+Fobs <- readRDS('FctTradeoffs/MEOW_fr_mi-5traits.Rds')
+
+#SES per ecoregion
+SES <- Fobs %>% 
+  mutate_at(vars(fred), SES_fred) %>% 
+  mutate_at(vars(fdisp), SES_fdisp) %>% 
+  select('eco', 'fred', 'fdisp') %>% 
+  rename(fred_ses = fred,
+         fdisp_ses = fdisp)
+
+#add SES and Fobs to Fnull dataframe
+Fct_df1 <- merge(Fnull, SES, by = 'eco', all.x = TRUE, all.y = TRUE)
+Fct_df <- merge(Fobs, Fct_df1, by = 'eco', all.x = TRUE, all.y = TRUE)
+Fct_df <- Fct_df %>% 
+  rename(fred_obs = fred,
+         fdisp_obs = fdisp)
+
+saveRDS(Fct_df, 'FctTradeoffs/Fct_df_obs_null_SES-5traits.Rds')
+#Fct_df <- readRDS('~/R/thesis/FctTradeoffs/Fct_df_obs_null_SES-5traits.Rds')
+
+#in order to plot it merge with the MEOW sf file to get geometry values
+#rename eco column to match MEOW df
+colnames(SES)[1] <- 'ECOREGION'
+#upload MEOW df
+MEOW_with_SR <- readRDS('FctTradeoffs/MEOW_with_SR.Rds')
+
+SES_MEOW <- merge(MEOW_with_SR, SES, by = "ECOREGION", all.x = TRUE)
+
+saveRDS(SES_MEOW, 'FctTradeoffs/MEOW_SES-eco-5traits.Rds')
+#SES_MEOW <- readRDS('FctTradeoffs/MEOW_SES-eco-5traits.Rds')
+```
+
+plots plots plots
+
+```{r plots obs}
+p_SPP <- ggplot(data = FR_MEOW_5, aes(fill = spp)) +
+  geom_sf() +
+  labs(fill = 'Number of Species') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(filename = 'MEOW_SPP_map-5traits.png', plot = p_SPP, path = '~/R/thesis/FctTradeoffs', 
+       width = 15, height = 10, unit = 'cm')
+
+p_Fred_obs <- ggplot(data = FR_MEOW_5, aes(fill = fred)) +
+  geom_sf() +
+  labs(fill = 'FRed') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(filename = 'MEOW_FRed_map-5traits.png', plot = p_Fred_obs, path = '~/R/thesis/FctTradeoffs', 
+       width = 15, height = 10, unit = 'cm')
+
+p_Fdisp_obs <- ggplot(data = FR_MEOW_5, aes(fill = fdisp)) +
+  geom_sf() +
+  labs(fill = 'FDisp') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(filename = 'MEOW_FDisp_map-5traits.png', plot = p_Fdisp_obs, path = '~/R/thesis/FctTradeoffs', 
+       width = 15, height = 10, unit = 'cm')
+
+```
+
+```{r SES plots}
+
+p_Fred_ses <- ggplot(data = SES_MEOW, aes(fill = fred_ses)) +
+  geom_sf() +
+  labs(fill = 'FRed SES') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(filename = 'MEOW_SES_FRed_map-eco-5traits.png', plot = p_Fred_ses, path = '~/R/thesis/FctTradeoffs', 
+       width = 15, height = 10, unit = 'cm')
+
+p_Fdisp_ses <- ggplot(data = SES_MEOW, aes(fill = fdisp_ses)) +
+  geom_sf() +
+  labs(fill = 'FDisp SES') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(filename = 'MEOW_SES_FDisp_map-eco-5traits.png', plot = p_Fdisp_ses, path = '~/R/thesis/FctTradeoffs', 
+       width = 15, height = 10, unit = 'cm')
+
+#utc
+mean(Fct_df$spp/Fct_df$utc) #1.004724
+```
+
+#4. Permutation test
+
+```{r}
+npermute <- 999
+
+#need to combine Fobs and Fnull into a dataframe 
+
+eco_obs <- data.frame(eco = rep(Fct_df$eco, each = npermute), fred_obs = rep(Fct_df$fred_obs, each = npermute), fdisp_obs = rep(Fct_df$fdisp_obs, each = npermute)) 
+eco_null <- null_data  %>% 
+  dplyr::select(eco, fred, fdisp) %>% 
+  dplyr::rename(fred_null = fred,
+                fdisp_null = fdisp) %>%
+  arrange(eco)
+
+eco_comb <- bind_cols(eco_obs, eco_null[,-"eco"])
+
+# one-tailed permutation test
+#both fred and fdisp
+ptest <- eco_comb %>% 
+  dplyr::mutate(fred_p_great = ifelse(fred_null > fred_obs, 1, 0),
+                fred_p_less = ifelse(fred_null < fred_obs, 1, 0),
+                fdisp_p_great = ifelse(fdisp_null > fdisp_obs, 1, 0),
+                fdisp_p_less = ifelse(fdisp_null < fdisp_obs, 1, 0)) %>% 
+  dplyr::group_by(eco) %>% 
+  dplyr::summarise(fred_p_great_sum = sum(fred_p_great),
+                   fred_p_less_sum = sum(fred_p_less),
+                   fdisp_p_great_sum = sum(fdisp_p_great),
+                   fdisp_p_less_sum = sum(fdisp_p_less)) %>% 
+  dplyr::mutate(fred_p_great_test = (fred_p_great_sum + 1) / (npermute + 1),
+                fred_p_less_test = (fred_p_less_sum + 1) / (npermute + 1),
+                fdisp_p_great_test = (fdisp_p_great_sum + 1) / (npermute + 1),
+                fdisp_p_less_test = (fdisp_p_less_sum + 1) / (npermute + 1))
+
+ptest_results <- ptest %>% 
+  dplyr::select(eco, fred_p_great_test, fred_p_less_test, fdisp_p_great_test, fdisp_p_less_test)
+
+```
+
+
+#5. Global Tradeoffs
+
+```{r fct tradeoff}
+#global tradeoff
+#functional dispersion SES - functional redundancy SES
+Fct_df2 <- Fct_df %>% 
+  mutate(tradeoff = fdisp_ses - fred_ses) 
+
+Fct_results <- merge(Fct_df2, ptest_results, by = 'eco')
+saveRDS(Fct_results, '~/R/thesis/FctTradeoffs/Fct_analysis_results.Rds')
+
+spp_utc <- Fct_results %>% 
+  dplyr::mutate(spp_higher = ifelse(spp > utc, 1, 0),
+         spp_equal = ifelse(spp == utc, 1, 0),
+         spp_diff = spp-utc)
+
+fct_red <- Fct_results %>% 
+  dplyr::mutate(f_red = ifelse(fred_obs == 1, 1, 0),
+                p_less = ifelse(fred_p_less_test >= 0.95, 1, 0),
+                p_higher = ifelse(fred_p_great_test >= 0.95, 1, 0),
+                p_disp_less = ifelse(fdisp_p_less_test >= 0.95, 1, 0),
+                p_disp_higher = ifelse(fdisp_p_great_test >= 0.95, 1, 0))
+
+spp_eq <- sum(spp_utc$spp_equal)
+(spp_eq/230)*100 #19.13%
+spp_high <- sum(spp_utc$spp_higher)
+(spp_high/230)*100 #80.87%
+
+fctred <- sum(fct_red$f_red)
+(fctred/230)*100 #19.13%
+
+fred_p <- sum(fct_red$p_less)
+(fred_p/230)*100 #69.57%
+fred_p_high <- sum(fct_red$p_higher)
+(fred_p_high/230)*100 #0
+fdisp_p_l <- sum(fct_red$p_disp_less)
+(fdisp_p_l/230)*100 #9.13%
+fdisp_p_g <- sum(fct_red$p_disp_higher)
+(fdisp_p_g/230)*100 #7.83%
+```
+
+
+```{r SES plots}
+points_tradeoff <- ggplot(Fct_df2, aes(x = fred_ses, y = fdisp_ses, col = tradeoff)) +
+  geom_point() +
+  scale_color_viridis_c() +
+  geom_vline(xintercept = 0, col = 'black', linetype = 'dashed') +
+  geom_hline(yintercept = 0, col = 'black', linetype = 'dashed') +
+  labs(x = 'Functional Redundancy SES',
+       y = 'Functional Dispersion SES',
+       col = 'Trade-off') +
+  theme_minimal()
+points_tradeoff
+ggsave(filename = 'tradeoff_points-5traits-2.png', plot = points_tradeoff, path = '~/R/thesis/FctTradeoffs', 
+       width = 7, height = 7, unit = 'cm')
+tradeoff <- Fct_df2 %>% 
+  dplyr::select(c('eco', 'tradeoff'))
+
+#rename eco column to match MEOW df
+colnames(tradeoff)[1] <- 'ECOREGION'
+#upload MEOW df
+MEOW_with_SR <- readRDS('FctTradeoffs/MEOW_with_SR.Rds')
+
+tradeoff_MEOW <- merge(MEOW_with_SR, tradeoff, by = "ECOREGION", all.x = TRUE)
+
+saveRDS(tradeoff_MEOW, 'FctTradeoffs/MEOW_tradeoff-eco-5traits.Rds')
+
+p_tradeoff <- ggplot(data = tradeoff_MEOW, aes(fill = tradeoff)) +
+  geom_sf() +
+  labs(fill = 'Trade-off') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+p_tradeoff
+ggsave(filename = 'MEOW_tradeoff_map-eco-5traits-2.png', plot = p_tradeoff, path = '~/R/thesis/FctTradeoffs', 
+       width = 15, height = 10, unit = 'cm')
+
+```
+
+
+#6. overlay maps with MPAs
+Marine protected areas (MPAs) shapefiles obtained from protectedplanet.net and stitched together into a single shp file using QGIS
+
+```{r}
+MPA_poly <- shapefile('MPA/MPAs-polygons.shp')
+MPA <- st_as_sf(MPA_poly)
+MPA <- MPA %>% 
+  dplyr::select(WDPAID, NAME, STATUS, STATUS_YR, PARENT_ISO, NO_TK_AREA, geometry)
+
+MPAgeo <- MPA %>% 
+  dplyr::select(geometry)
+
+saveRDS(MPAgeo, 'MPA/MPA-sf-geo.Rds')
+#MPAgeo <- readRDS('MPA/MPA-sf-geo.Rds')
+
+#FRed and MPAs
+MPA_p1 <- ggplot() +
+  geom_sf(data = FR_MEOW_5, aes(fill = fred)) +
+  geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
+  labs(fill = 'FRed') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(plot = MPA_p1, 'FRed+MPAs3.png', width=15, height=10, units = 'cm')
+
+MPA_p2 <- ggplot() +
+  geom_sf(data = FR_MEOW_5, aes(fill = fdisp)) +
+  geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
+  labs(fill = 'FDisp') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(plot = MPA_p2, 'FDisp+MPAs.png', width=15, height=10, units = 'cm')
+
+#FDisp and MPA
+MPA_p3 <- ggplot() +
+  geom_sf(data = SES_MEOW, aes(fill = fred_ses)) +
+  geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
+  labs(fill = 'FRed SES') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(plot = MPA_p3, 'FRed_SES+MPAs.png', width=15, height=10, units = 'cm')
+
+MPA_p4 <- ggplot() +
+  geom_sf(data = SES_MEOW, aes(fill = fdisp_ses)) +
+  geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
+  labs(fill = 'FDisp SES') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(plot = MPA_p4, 'FDisp_SES+MPAs.png', width=15, height=10, units = 'cm')
+
+#Tradeoff and MPA
+MPA_p5 <- ggplot() +
+  geom_sf(data = tradeoff_MEOW, aes(fill = tradeoff)) +
+  geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
+  labs(fill = 'Trade-off') +
+  scale_fill_viridis_c() +
+  coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
+  theme_minimal()
+
+ggsave(plot = MPA_p5, 'Tradeoff+MPAs2.png', width=15, height=10, units = 'cm')
+
+```
+
+
+

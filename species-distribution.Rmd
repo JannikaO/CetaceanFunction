@@ -1,0 +1,161 @@
+---
+title: "Aquamaps"
+author: "Jannika Oeke"
+date: "6/28/2021"
+output: 
+  pdf_document:
+    keep_tex: True
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Native Range maps for cetaceans
+Maps downloaded from aquamaps.org for each cetacean species (n = 81) in .nc format and saved in a single folder.
+Reference:
+Kaschner, K. et al. (2019). AquaMaps: Predicted range maps for aquatic species. Retrieved from https://www.aquamaps.org.
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(ncdf4)
+library(raster)
+library(dplyr)
+library(tidyverse)
+library(RColorBrewer)
+library(maptools)
+library(myplot)
+```
+
+# Input nc files
+Input all nc files and save as a raster stack
+
+```{r data input nc, eval=FALSE, include=TRUE}
+#specify path to the .nc files
+ncpath <- '~/Sussex/thesis/Aquamaps/nc'
+nc_files <- list.files(path = ncpath, pattern = '.nc$', full.names = TRUE) 
+
+NC <- nc_open(nc_files)
+print(NC)
+
+# Get whale names
+whale_names <- vector()
+for (i in 1:length(nc_files)){
+  whale_names[i] <- str_extract(nc_files[i], "(?<=nc/)[^;]*(?=.nc)")
+}
+
+#set extent for raster stack
+e <- extent(-180, 180, -90, 90)
+#make empty list for rasters
+rasters <- list()
+#extract each raster and extend or crop extent accordingly
+for(i in 1:length(NC$filename)){
+  rasters[[i]] <- raster(NC$filename[[i]]) %>%
+    extend(., e) %>%
+    crop(., e)
+}
+
+#close NC files
+nc_close(NC)
+
+#stack all individual rasters
+whales <- raster::stack(rasters)
+
+names(whales)
+#rename individual layers from probability.1 etc to species names using the vector created earlier
+names(whales) <- whale_names
+
+#plot individual maps 
+plot(whales[[2]])
+
+#save raster stack
+saveRDS(whales, 'RES_rasterstack.Rds')
+#whales <- readRDS('RES_rasterstack.Rds')
+
+#set colour and breaks for pretty plot
+col <- brewer.pal(6, 'GnBu')
+brk <- c(0, 0.01, 0.2, 0.4, 0.6, 0.8, 1)
+#plot map for a single species
+p1 <- myplot({
+  plot(whales[[41]], #humpback
+     breaks = brk, col = col,
+     main = 'Megaptera novaeangliae Native Range', 
+     xlab = 'Longitude', ylab = 'Latitude',
+     ylim = c(-90,90),
+     legend.args = list(text = 'RES', font = 2, cex =0.8))
+})
+
+plotsave(p1, file = 'RES_humpback.png', width = 15, height = 10, units = 'cm')
+```
+
+#Convert RES to likely presence/absence
+Relative environmental suitability (RES) (= probability of occurrence) ranges from 0-1, define >=0.6 as (likely) present = 1, rest as (likely) absent = 0
+
+```{r presence, eval=FALSE, include=TRUE}
+#change RES probability to presence
+#make a matrix with the conditions to reclassify the data
+#3 column table: 1 column is the 'from' 2 column 'to' and 3 column 'becomes'
+#here: all values >0 and <= 0.59 become 0 AND >0.59 and <= 1 become 1
+
+fct <- c(0, 0.59, 0, 0.59, 1, 1)
+fct1 <- matrix(fct, ncol = 3, byrow = T)
+
+#create empty list to create new rasters into
+presence <- list()
+#loop reclassifying the data in each raster layer 
+#1. changing all NA to 0
+#2. change RES to presence/absence
+for(i in 1:length(whales@layers)){
+  presence[[i]] <- reclassify(whales[[i]], cbind(NA, 0)) %>%
+  reclassify(., fct1) 
+}
+#stack new raster layers
+whales_pres <- stack(presence)
+#plot a few individual layers
+plot(whales_pres[[2:5]])
+#save raster stack 
+saveRDS(whales_pres, 'pres_rasterstack.Rds')
+#whales_pres <- readRDS('pres_rasterstack.Rds')
+
+#plot single layer
+plot(whales_pres[[41]])
+
+p2 <- myplot({
+  plot(whales_pres[[41]], #humpback
+     main = 'Megaptera novaeangliae Presence (RES \u2265 0.6)', #RES bigger equal 0.6 
+     xlab = 'Longitude', ylab = 'Latitude',
+     ylim = c(-90,90),
+     legend = FALSE)
+})
+plotsave(p2, file = 'pres_humpback.png', width = 15, height = 10, units = 'cm')
+
+#sum all presences together
+sum_pres <- stackApply(whales_pres, indices = 1, fun = sum)
+#save summary
+saveRDS(sum_pres, 'sum_pres_rasterstack.Rds')
+#sum_pres <- readRDS('sum_pres_rasterstack.Rds')
+sum_pres_df <- sum_pres@data
+plot(sum_pres)
+sum_pres@data@max #41
+
+col2 <- brewer.pal(8, 'YlGnBu')
+col3 <- viridis::viridis(11)
+brk2 <- c(0, 1, 5, 10, 15, 20, 25, 30, 35, 40, 41)
+#load world map from maptools package
+data('wrld_simpl')
+
+p3 <- myplot({
+  plot(sum_pres, breaks = brk2, col = col3,
+     #main = 'Cetacean Species Richness', 
+     xlab = 'Longitude', ylab = 'Latitude',
+     ylim = c(-90,90),
+     legend.args = list(text = 'Number of Species', font = 2, line = 0.5, side = 2, cex =0.8))
+  #add continents in white without black borders of countries
+  plot(wrld_simpl, 
+       col = 'white',
+       border = 'white', 
+       add = TRUE)
+})
+
+plotsave(p3, file = 'sum_pres-wrld3.png', width = 15, height = 10, units = 'cm')
+```
