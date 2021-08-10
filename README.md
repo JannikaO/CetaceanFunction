@@ -10,4 +10,4 @@ furthermore by determining the functional trade-off between dispersion and redun
 
 Repository contains:
 - R code for determining species distribution (using aquamaps.org), selecting and imputating traits data, and doing the functional analysis
-- results from the trait selection, trait imputation and the functional analysis
+- results from the trait selection, trait imputation and the functional analysis in the 'data' folder
