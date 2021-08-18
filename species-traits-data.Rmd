@@ -18,13 +18,14 @@ Gather all potentially relevant trait data from different databases:
 ```{r library, message=FALSE, warning=FALSE}
 library(dplyr)
 library(car)
+library(DescTools)
 library(PVR)
 library(mice)
 ```
 
 #1. Upload all datasets
 Datasets were subset to only include cetaceans in excel prior to uploading to avoid big files.
-Furthermore, the sperm whale entry was edited manually to 'Physeter macrocephalus' in 2 of the datasets in excel to remove the synonym 'Physeter catodon' prior to uploading.
+Furthermore, the sperm whale entry was edited manually to 'Physeter macrocephalus' in 2 of the datasets in excel to remove the synonym 'Physeter catodon' and the spelling of 'Mesoplodon ginkgodens' was corrected in the Marine Megafauna Traits dataset prior to uploading.
 
 ```{r data upload}
 #upload first dataset
@@ -84,7 +85,10 @@ traits2 <- traits2 %>%
   dplyr::mutate(meanBodyMass = rowMeans(.[c('weight', 'BodyMass.Value', 'adult_body_mass_g')], na.rm = T)) %>% 
   dplyr::select(-c('weight', 'BodyMass.Value', 'adult_body_mass_g')) %>% 
 #remove diet categories which do not make sense 
-  dplyr::select(-c('Diet.Vect', 'Diet.Vunk', 'Diet.Scav', 'Diet.Fruit', 'Diet.Nect', 'Diet.Seed', 'Diet.PlantO'))
+  dplyr::select(-c('Diet.Vect', 'Diet.Vunk', 'Diet.Scav', 'Diet.Fruit', 'Diet.Nect', 
+                   'Diet.Seed', 'Diet.PlantO')) %>% 
+  #remove litter and clutch size n as it does not make sense when looking at this single taxa with very similar values
+  dplyr::select(-c('litter_or_clutch_size_n'))
 
 #remove freshwater species
 #upload marine_species_only data
@@ -99,227 +103,237 @@ traits3 <- merge(marine, traits2, by = 'species')
 traits4 <- traits3 %>% 
   dplyr::mutate(HabitatBreadth = rowSums(.[c('Arctic', 'North.Pacific', 'South.Pacific', 'North.Atlantic', 'South.Atlantic', 'Indian', 'Southern')], na.rm = T)) %>% 
   dplyr::select(-c('Arctic', 'North.Pacific', 'South.Pacific', 'North.Atlantic', 'South.Atlantic', 'Indian', 'Southern')) %>% 
-
   #make diel activity category and drop the original ones
-  #nocturnal = 1, noct+twilight = 2, all = 3, diurnal + twilight = 4, diurnal = 5
   dplyr::mutate(DielActivity = 
-            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 0 & Activity.Diurnal == 0, 1,
-            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 1 & Activity.Diurnal == 0, 2, 
-            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 1 & Activity.Diurnal == 1, 3,
-            if_else(Activity.Nocturnal == 0 & Activity.Crepuscular == 1 & Activity.Diurnal == 1, 4, 5))))) %>% 
-  dplyr::select(-c('Activity.Nocturnal', 'Activity.Crepuscular', 'Activity.Diurnal'))
-
-#make all categorical variables into numerical ones
-traits5 <- traits4 %>% 
-  dplyr::mutate(migration = if_else(migration == 'marine', 1, 0)) %>% 
-  dplyr::mutate(breeding_site = if_else(breeding_site == 'coastal', 0, 
-                                        if_else(breeding_site == 'oceanic', 1, 2))) %>% 
-  dplyr::mutate(vertical = if_else(vertical == 'pelagic', 0,
-                                   if_else(vertical == 'benthopelagic', 1, 2))) %>% 
-  dplyr::mutate(diet = if_else(diet == 'plankton', 0, 
-                               if_else(diet == 'inverts', 1,
-                                       if_else(diet == 'inverts/fish', 2,
-                                               if_else(diet == 'fish', 3, 4))))) %>% 
-  dplyr::mutate(feeding = if_else(feeding == 'filter-feeding', 0, 1)) %>% 
-  dplyr::mutate(group_behaviour = if_else(group_behaviour == 'solitary', 0,
-                                          if_else(group_behaviour == 'social', 1, 2)))
-
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 0 & Activity.Diurnal == 0, 'N',
+            if_else(Activity.Nocturnal == 0 & Activity.Crepuscular == 1 & Activity.Diurnal == 0, 'C',
+            if_else(Activity.Nocturnal == 0 & Activity.Crepuscular == 0 & Activity.Diurnal == 1, 'D', 
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 1 & Activity.Diurnal == 0, 'NC',
+            if_else(Activity.Nocturnal == 0 & Activity.Crepuscular == 1 & Activity.Diurnal == 1, 'CD', 
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 0 & Activity.Diurnal == 1, 'ND',
+            if_else(Activity.Nocturnal == 1 & Activity.Crepuscular == 1 & Activity.Diurnal == 1, 'NCD',
+                    'None')))))))) %>% 
+  dplyr::select(-c('Activity.Nocturnal', 'Activity.Crepuscular', 'Activity.Diurnal')) %>%
+  #set all categorical fariables as factor and habitat breadth as discrete variable (integer)
+  mutate(DielActivity = as.factor(DielActivity),
+         habitat = as.factor(habitat),
+         breeding_site = as.factor(breeding_site),
+         migration = as.factor(migration),
+         vertical = as.factor(vertical),
+         diet = as.factor(diet),
+         feeding = as.factor(feeding),
+         group_behaviour = as.factor(group_behaviour),
+         HabitatBreadth = as.integer(HabitatBreadth))
 
 ```
 
 #3. Regression analysis
 Reduce multicollinearity by regressing each trait against all other traits using linear regression models.
 
-```{r trait selection}
-#reduce multicollinearity by regressing each trait against all other traits using regression
+```{r trait selection continuous}
+#reduce multicollinearity by regressing each continuous trait against all other continuous traits using regression
 #doesn't work if there are many NAs in the dataset thus subset for correlation by removing NAs
 traitsNA <- traits4 %>% 
   na.omit()
-#do linear regression models of all numerical variables first (not ones I made numerical)- check if VIF is under 5 then later do under 3
-mod1 <- lm(female_maturity_d ~ litter_or_clutch_size_n + litters_or_clutches_per_y +
-           maximum_longevity_y + gestation_d + weaning_d + birth_or_hatching_weight_g +
-           longevity_y + male_maturity_d + inter_litter_or_interbirth_interval_y +
-            meanBodyMass + HabitatBreadth + DielActivity, data = traitsNA) 
-vif(mod1) #only litter size and diel activity under 3, habitat breadth under 5 all others over 5
+#do linear regression models and check if VIF is under 5 then later do under 3
+mod1 <- lm(female_maturity_d ~ litters_or_clutches_per_y + maximum_longevity_y + 
+             gestation_d + weaning_d + birth_or_hatching_weight_g + longevity_y + 
+             male_maturity_d + inter_litter_or_interbirth_interval_y + 
+             meanBodyMass + HabitatBreadth, data = traitsNA) 
+vif(mod1) #habitat breadth under 3, weaning under 5
 
-mod2 <- lm(litter_or_clutch_size_n ~ litters_or_clutches_per_y +
-           maximum_longevity_y + gestation_d + weaning_d + birth_or_hatching_weight_g +
-           longevity_y + male_maturity_d + inter_litter_or_interbirth_interval_y +
-            meanBodyMass + HabitatBreadth + DielActivity + female_maturity_d, data = traitsNA) 
-vif(mod2) #only diel activity under 3, habitat under 5
-
-mod3 <- lm(litters_or_clutches_per_y  ~ maximum_longevity_y + gestation_d + weaning_d +
+mod2 <- lm(litters_or_clutches_per_y  ~ maximum_longevity_y + gestation_d + weaning_d +
              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n, data = traitsNA) 
-vif(mod3) #only litter size and diel activity under 3, weaning and habitat breadth under 5
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + 
+             female_maturity_d, data = traitsNA) 
+vif(mod2) #none under 3, weaning, inter litter interval y and habitat breadth under 5
 
-mod4 <- lm(maximum_longevity_y ~ gestation_d + weaning_d +
+mod3 <- lm(maximum_longevity_y ~ gestation_d + weaning_d +
              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y, data = traitsNA) 
-vif(mod4) #litter size and diel activity under 3, habitat breadth under 5
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + 
+             female_maturity_d + litters_or_clutches_per_y, data = traitsNA) 
+vif(mod3) #none under 3, habitat breadth and weaning under 5
 
-mod5 <- lm(gestation_d ~ weaning_d +
+mod4 <- lm(gestation_d ~ weaning_d +
              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
-              maximum_longevity_y, data = traitsNA) 
-vif(mod5) #litter size and diel activity and weaning under 3, habitat breadth under 5
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + 
+             female_maturity_d + litters_or_clutches_per_y + maximum_longevity_y, data = traitsNA) 
+vif(mod4) #habitat breadth and weaning under 3, none under 5
 
-mod6 <- lm(weaning_d ~ birth_or_hatching_weight_g + longevity_y + male_maturity_d +
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+mod5 <- lm(weaning_d ~ birth_or_hatching_weight_g + longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth +
+             female_maturity_d + litters_or_clutches_per_y +
               maximum_longevity_y + gestation_d, data = traitsNA) 
-vif(mod6) #litter size and diel activity under 3, habitat breadth and gestation under 5
+vif(mod5) #habitat breadth under 3, gestation under 5
 
-mod7 <- lm(birth_or_hatching_weight_g ~ longevity_y + male_maturity_d +
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+mod6 <- lm(birth_or_hatching_weight_g ~ longevity_y + male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth +
+             female_maturity_d + litters_or_clutches_per_y +
               maximum_longevity_y + gestation_d + weaning_d, data = traitsNA) 
-vif(mod7) #litter size and diel activity under 3, bodymass and habitat breadth under 5
+vif(mod6) #none under 3, bodymass, habitat breadth and weaning under 5
 
-mod8 <- lm(longevity_y ~ male_maturity_d +
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+mod7 <- lm(longevity_y ~ male_maturity_d +
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth +
+             female_maturity_d + litters_or_clutches_per_y +
               maximum_longevity_y + gestation_d + weaning_d +
               birth_or_hatching_weight_g, data = traitsNA) 
-vif(mod8) #habitat breadth, diel activity, litter size under 3, gestation and weaning under 5
+vif(mod7) #habitat breadth under 3, gestation and weaning under 5
 
-mod9 <- lm(male_maturity_d ~
-             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+mod8 <- lm(male_maturity_d ~
+             inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth +
+             female_maturity_d + litters_or_clutches_per_y +
               maximum_longevity_y + gestation_d + weaning_d +
               birth_or_hatching_weight_g + longevity_y, data = traitsNA) 
-vif(mod9) #habitat breadth, diel activity, litter size under 3, weaning under 5
+vif(mod8) #habitat breadth under 3, weaning under 5
 
-mod10 <- lm(inter_litter_or_interbirth_interval_y ~ meanBodyMass + HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
-              maximum_longevity_y + gestation_d + weaning_d +
-              birth_or_hatching_weight_g + longevity_y + male_maturity_d, data = traitsNA) 
-vif(mod10) #diel activity, litter size under 3, habitat breadth under 5
+mod9 <- lm(inter_litter_or_interbirth_interval_y ~ meanBodyMass + HabitatBreadth +
+             female_maturity_d + litters_or_clutches_per_y + maximum_longevity_y + 
+             gestation_d + weaning_d + birth_or_hatching_weight_g + longevity_y + 
+             male_maturity_d, data = traitsNA) 
+vif(mod9) #none under 3, habitat breadth, litters per year and weaning under 5
 
-mod11 <- lm(meanBodyMass ~ HabitatBreadth + DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+mod10 <- lm(meanBodyMass ~ HabitatBreadth +
+             female_maturity_d + litters_or_clutches_per_y +
               maximum_longevity_y + gestation_d + weaning_d +
               birth_or_hatching_weight_g + longevity_y + male_maturity_d +
                inter_litter_or_interbirth_interval_y, data = traitsNA) 
-vif(mod11) #diel activity, litter size under 3, habitat breadth under 5
+vif(mod10) #none under 3, habitat breadth and weaning under 5
 
-mod12 <- lm(HabitatBreadth ~ DielActivity +
-             female_maturity_d + litter_or_clutch_size_n + litters_or_clutches_per_y +
+mod11 <- lm(HabitatBreadth ~ female_maturity_d + litters_or_clutches_per_y + 
               maximum_longevity_y + gestation_d + weaning_d +
               birth_or_hatching_weight_g + longevity_y + male_maturity_d +
                inter_litter_or_interbirth_interval_y + meanBodyMass, data = traitsNA) 
-vif(mod12) #diel activity, litter size under 3, weaning under 5
-
-mod13 <- lm(DielActivity ~ female_maturity_d + litter_or_clutch_size_n + 
-              litters_or_clutches_per_y + maximum_longevity_y + gestation_d + weaning_d +
-              birth_or_hatching_weight_g + longevity_y + male_maturity_d +
-              inter_litter_or_interbirth_interval_y + meanBodyMass + HabitatBreadth, data = traitsNA) 
-vif(mod13) #litter_or_clutch size under 3, habitat breadth, weaning under 5
+vif(mod11) #none under 3, weaning under 5
 
 #select all of the traits that were under 5 in any of the models
 traits_vif5 <- traitsNA %>% 
-  select(c('litter_or_clutch_size_n', 'DielActivity', 'HabitatBreadth', 'weaning_d', 'gestation_d', 'meanBodyMass'))
+  select(c('litters_or_clutches_per_y', 'inter_litter_or_interbirth_interval_y', 
+           'HabitatBreadth', 'weaning_d', 'gestation_d', 'meanBodyMass'))
 #check again by regression
-mod_1 <- lm(litter_or_clutch_size_n ~ DielActivity + HabitatBreadth + weaning_d +
-              gestation_d + meanBodyMass, data = traits_vif5)
+mod_1 <- lm(litters_or_clutches_per_y ~ inter_litter_or_interbirth_interval_y +
+              HabitatBreadth + weaning_d + gestation_d + meanBodyMass, data = traits_vif5)
 vif(mod_1) #all under 3
 
-#now add the remaining traits to the regression models
-#I converted the categorical ones into numerical categories so they can also be the dependent varibable
-traitsNA2 <- traits5 %>% 
-  na.omit()
-#don't use feeding as it is correlated to diet
-cor(traitsNA2$diet, traitsNA2$feeding) #0.79
-mod.1 <- lm(litter_or_clutch_size_n ~ DielActivity + HabitatBreadth + weaning_d +
-              gestation_d + meanBodyMass + breeding_site + migration + vertical + 
-              diet + group_behaviour, data = traitsNA2)
-vif(mod.1) #weaining and group_behaviour OVER 3
+mod_2 <- lm(inter_litter_or_interbirth_interval_y ~
+              HabitatBreadth + weaning_d + gestation_d + meanBodyMass +
+              litters_or_clutches_per_y, data = traits_vif5)
+vif(mod_2) #all under 3
 
-mod.2 <- lm(DielActivity ~ HabitatBreadth + weaning_d +
-              gestation_d + meanBodyMass + breeding_site + migration + vertical + 
-              diet + group_behaviour + litter_or_clutch_size_n, data = traitsNA2)
-vif(mod.2) #weaning and group_behaviour OVER 3
+mod_3 <- lm(HabitatBreadth ~ weaning_d + gestation_d + meanBodyMass +
+              litters_or_clutches_per_y + inter_litter_or_interbirth_interval_y, data = traits_vif5)
+vif(mod_3) #litter or clutches per year over 3
 
-mod.3 <- lm(HabitatBreadth ~ weaning_d + gestation_d + meanBodyMass + breeding_site + 
-              migration + vertical + diet + group_behaviour + 
-              litter_or_clutch_size_n + DielActivity, data = traitsNA2)
-vif(mod.3) #weaning and group_behaviour OVER 3
+mod_4 <- lm(weaning_d ~ gestation_d + meanBodyMass + litters_or_clutches_per_y +
+              inter_litter_or_interbirth_interval_y + HabitatBreadth, data = traits_vif5)
+vif(mod_4) #litter or clutches per year over 3
 
-mod.4 <- lm(weaning_d ~ gestation_d + meanBodyMass + breeding_site + 
-              migration + vertical + diet + group_behaviour + 
-              litter_or_clutch_size_n + DielActivity + HabitatBreadth, data = traitsNA2)
-vif(mod.4) #group_behaviour OVER 3 
+mod_5 <- lm(gestation_d ~ meanBodyMass +
+              litters_or_clutches_per_y + inter_litter_or_interbirth_interval_y +
+              HabitatBreadth + weaning_d, data = traits_vif5)
+vif(mod_5) #litter or clutches per year over 3
 
-mod.5 <- lm(gestation_d ~ meanBodyMass + breeding_site + migration + vertical + 
-              diet + group_behaviour + litter_or_clutch_size_n + DielActivity + 
-              HabitatBreadth + weaning_d, data = traitsNA2)
-vif(mod.5) #group_behaviour and weaning OVER 3
+mod_6 <- lm(meanBodyMass ~ litters_or_clutches_per_y + inter_litter_or_interbirth_interval_y +
+              HabitatBreadth + weaning_d + gestation_d, data = traits_vif5)
+vif(mod_6) #litter or clutches per year over 3
 
-mod.6 <- lm(meanBodyMass ~ breeding_site + migration + vertical + 
-              diet + group_behaviour + litter_or_clutch_size_n + DielActivity + 
-              HabitatBreadth + weaning_d + gestation_d, data = traitsNA2)
-vif(mod.6) #group_behaviour and weaning OVER 3
+traits_vif3_cont <- traits_vif5 %>% 
+  select(-c('litters_or_clutches_per_y'))
 
-mod.7 <- lm(breeding_site ~ migration + vertical + diet + group_behaviour + 
-              litter_or_clutch_size_n + DielActivity + HabitatBreadth + 
-              weaning_d + gestation_d + meanBodyMass, data = traitsNA2)
-vif(mod.7) #group_behaviour and weaning OVER 3
+mod.1 <- lm(inter_litter_or_interbirth_interval_y ~
+              HabitatBreadth + weaning_d + gestation_d + meanBodyMass, data = traits_vif3_cont)
+vif(mod.1) #all under 3
+mod.2 <- lm(HabitatBreadth ~ weaning_d + gestation_d + meanBodyMass +
+              inter_litter_or_interbirth_interval_y, data = traits_vif3_cont)
+vif(mod.2) #all under 3
+mod.3 <- lm(weaning_d ~ gestation_d + meanBodyMass +
+              inter_litter_or_interbirth_interval_y +
+              HabitatBreadth, data = traits_vif3_cont)
+vif(mod.3) #all under 3
+mod.4 <- lm(gestation_d ~ meanBodyMass +
+              inter_litter_or_interbirth_interval_y +
+              HabitatBreadth + weaning_d, data = traits_vif3_cont)
+vif(mod.4) #all under 3
+mod.5 <- lm(meanBodyMass ~ inter_litter_or_interbirth_interval_y +
+              HabitatBreadth + weaning_d + gestation_d, data = traits_vif3_cont)
+vif(mod.5) #all under 3
 
-mod.8 <- lm(migration ~ vertical + diet + group_behaviour + 
-              litter_or_clutch_size_n + DielActivity + HabitatBreadth + 
-              weaning_d + gestation_d + meanBodyMass + breeding_site, data = traitsNA2)
-vif(mod.8) #group_behaviour and weaning OVER 3
+vif3 <- cor(traits_vif3_cont)
+#remove weaning as it is medium correlated with gestation (> 0.5)
+traits_vif3_cont <- traits_vif3_cont %>% 
+  select(-weaning_d)
 
-mod.9 <- lm(vertical ~ diet + group_behaviour + 
-              litter_or_clutch_size_n + DielActivity + HabitatBreadth + 
-              weaning_d + gestation_d + meanBodyMass + breeding_site + migration, data = traitsNA2)
-vif(mod.9) #group_behaviour and weaning OVER 3
-
-mod.10 <- lm(diet ~ group_behaviour + litter_or_clutch_size_n + DielActivity + 
-               HabitatBreadth + weaning_d + gestation_d + meanBodyMass + 
-               breeding_site + migration + vertical, data = traitsNA2)
-vif(mod.10) #group_behaviour and weaning OVER 3
-
-mod.11 <- lm(group_behaviour ~ litter_or_clutch_size_n + DielActivity + 
-               HabitatBreadth + weaning_d + gestation_d + meanBodyMass + 
-               breeding_site + migration + vertical + diet, data = traitsNA2)
-vif(mod.11) #weaning OVER 3
-
-#remove weaning and group behaviour!
-traits_vif3 <- traitsNA2 %>% 
-  select(c('litter_or_clutch_size_n', 'DielActivity', 'HabitatBreadth', 'gestation_d',
-           'meanBodyMass', 'breeding_site', 'migration', 'vertical', 'diet'))
-
-mod_2 <- lm(litter_or_clutch_size_n ~ DielActivity + HabitatBreadth + gestation_d + 
-                meanBodyMass + breeding_site + migration + vertical + diet, data = traits_vif3)
-vif(mod_2)
-#all under 3
 ```
+
+```{r trait selection categorical traits}
+#do chi-square test to test correlation between 2 categorical traits, H0 assume they are independent, if p < 0.05 reject null hypothesis that they are independent thus they are correlated 
+
+chisq.test(traitsNA$breeding_site, traitsNA$migration)
+#p-value: 0.5796 - indep
+chisq.test(traitsNA$breeding_site, traitsNA$vertical)
+#p-value: 0.8131 - indep
+chisq.test(traitsNA$breeding_site, traitsNA$diet)
+#p-value: 0.8215 - indep
+chisq.test(traitsNA$breeding_site, traitsNA$feeding)
+#p-value: 0.1433 - indep
+chisq.test(traitsNA$breeding_site, traitsNA$group_behaviour)
+#p-value: 0.1069 - indep
+
+chisq.test(traitsNA$migration, traitsNA$vertical)
+#p-value: 0.7245 - indep
+chisq.test(traitsNA$migration, traitsNA$diet)
+#p-value: 0.8347 - indep
+chisq.test(traitsNA$migration, traitsNA$feeding)
+#p-value: 1 - correlated
+chisq.test(traitsNA$migration, traitsNA$group_behaviour)
+#p-value: 0.2171 - indep
+
+chisq.test(traitsNA$vertical, traitsNA$diet)
+#p-value: 0.2802 - indep
+chisq.test(traitsNA$vertical, traitsNA$feeding)
+#p-value: 0.0344 - dependent
+chisq.test(traitsNA$vertical, traitsNA$group_behaviour)
+#p-value: 0.6052 - indep
+
+chisq.test(traitsNA$diet, traitsNA$feeding)
+#p-value: 7.987e-05 - dependent
+chisq.test(traitsNA$diet, traitsNA$group_behaviour)
+#p-value: 0.01263 - dependent
+
+chisq.test(traitsNA$feeding, traitsNA$group_behaviour)
+#p-value: 0.001028 - dependent
+
+
+#calculate Cramer V and Pearsons Correlation Coefficient C for all 6 categorical traits, pairwise with symmetry = true and C corrected (correct for sample size, standardize results to lie between 0 and 1)
+V <- PairApply(traitsNA[,c('DielActivity', 'breeding_site','migration','vertical', 'diet', 'feeding', 'group_behaviour')], CramerV, symmetric = TRUE)
+
+#PairApply(traitsNA[,c("breeding_site","migration","vertical", 'diet', 'feeding', 'group_behaviour')], ContCoef, symmetric = TRUE, correct = TRUE)
+
+#select categorical traits with Cramer V coefficient below 0.5 as a medium correlation cutoff 
+traitsNA_cat <- traitsNA %>% 
+  select(c('breeding_site', 'migration', 'vertical', 'diet', 'DielActivity'))
+
+```
+
 
 #subset trait data
 Subset trait dataset according to the results from the regression analysis and save these.
 
 ```{r trait subset}
 #generate final list with traits to use for further analysis and save the files as .csv
-traits_final <- traits5 %>% 
-  select(c('species', 'litter_or_clutch_size_n', 'gestation_d', 'DielActivity', 'HabitatBreadth',
-           'meanBodyMass', 'breeding_site', 'migration', 'vertical', 'diet')) %>% 
-  rename(LitterSize_n = litter_or_clutch_size_n)
+traits_final <- traits4 %>% 
+  select(c('species', 'inter_litter_or_interbirth_interval_y', 'gestation_d', 'HabitatBreadth',
+           'meanBodyMass', 'DielActivity', 'breeding_site', 'migration', 'vertical', 'diet')) %>% 
+  rename(YearsInterBirth = 'inter_litter_or_interbirth_interval_y')
 write.csv(traits_final, 'Traits/traits.csv')
-#traits_final <- read.csv('Traits/traits.csv')
 
 #make a file for family and species
-family <- traits5 %>% 
+family <- traits4 %>% 
   select(c('species', 'family'))
-
 write.csv(family, 'Traits/family.csv')
-#make an iucn file
-iucn <- traits5 %>% 
-  select(c('species', 'IUCN'))
 
+#make an iucn file
+iucn <- traits4 %>% 
+  select(c('species', 'IUCN'))
 write.csv(iucn, 'Traits/iucn.csv')
 
 ```
@@ -332,13 +346,44 @@ Following method from Cooke et al. 2019 https://doi.org/10.1038/s41467-019-10284
 ```{r trait setup}
 #set up trait data
 trait <- read.csv('Traits/traits.csv')
+#make categorical variables into numerical integers in order to be able to do imputation and functional analysis
+unique(trait$DielActivity) #NCD, D, NC and CD
 trait <- trait %>% 
-  dplyr::select(-X)
+  dplyr::select(-X) %>% 
+  dplyr::mutate(migration = if_else(migration == 'marine', 1, 0)) %>% 
+  dplyr::mutate(breeding_site = if_else(breeding_site == 'coastal', 0, 
+                                        if_else(breeding_site == 'oceanic', 1, 2))) %>% 
+  dplyr::mutate(vertical = if_else(vertical == 'benthic', 0,
+                                   if_else(vertical == 'pelagic', 1, 2))) %>% 
+  dplyr::mutate(diet = if_else(diet == 'plankton', 0, 
+                               if_else(diet == 'inverts', 1,
+                                       if_else(diet == 'inverts/fish', 2,
+                                               if_else(diet == 'fish', 3, 4))))) %>% 
+  dplyr::mutate(diet = as.integer(diet),
+                migration = as.integer(migration)) %>% 
+  dplyr::mutate(DielActivity = if_else(DielActivity == 'D', 1,
+                                        if_else(DielActivity == 'CD', 2,
+                                                if_else(DielActivity == 'NC', 3, 4))))
+#check how many NAs are in the data - how many % per trait needs to be imputated
+NAs_t <- colSums(is.na(trait))
+NAs_gest <- NAs_t[3]/82*100 #22%
+NAs_mig <- NAs_t[8]/82*100 #8.54%
+#subset to the final 5 traits to check for how many species have NAs
+tr5 <- trait %>% 
+  select(-c('breeding_site', 'vertical', 'DielActivity', 'YearsInterBirth'))
 
+NAs_species <- rowSums(is.na(tr5))
+NAs_species <- as.data.frame(NAs_species)
+NAs_species <- NAs_species %>% 
+  filter(NAs_species != 0)
+20/82*100 #24.39%
+
+#upload family data
 family <- read.csv('Traits/family.csv')
 family <- family %>% 
   dplyr::select(-X)
 
+#merge traits and family data
 tr <- trait %>% 
   # add class data
   dplyr::left_join(family, by = "species")
@@ -372,7 +417,7 @@ pem <- pem %>%
 
 #save phylogenetic eigenvectors dataframe
 saveRDS(pem, 'Traits/pem_cetaceans.Rds')
-pem <- readRDS('Traits/pem_cetaceans.Rds')
+#pem <- readRDS('Traits/pem_cetaceans.Rds')
 ```
 
 
