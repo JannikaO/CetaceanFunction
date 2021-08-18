@@ -107,9 +107,9 @@ tr_mi <- readRDS('Traits/tr_mi.rds')
 #check normality of continous traits
 tr3 <- tr_mi[[3]] %>% 
   select(-species)
-hist(tr3$LitterSize_n) #continuous
-hist(log10(tr3$LitterSize_n)) #still very skeweed as most are  less than 1
-hist(sqrt(tr3$LitterSize_n)) #still same - leave be
+hist(tr3$YearsInterBirth) #continuous
+hist(log10(tr3$YearsInterBirth)) #meh
+hist(sqrt(tr3$YearsInterBirth)) #use this
 
 hist(tr3$gestation_d) #continuous
 hist(log10(tr3$gestation_d)) #perhaps a little better ?
@@ -124,7 +124,7 @@ lines(density(log10(tr3$meanBodyMass)), col = 2)
 #randomly select one of the 25 imputated datasets
 td_mi <- tr_mi[[3]] %>% 
   #remove traits so I am only left with the 5 I want!
-  dplyr::select(-LitterSize_n, -breeding_site, -vertical, -DielActivity) %>% 
+  dplyr::select(-YearsInterBirth, -breeding_site, -vertical, -DielActivity) %>% 
   dplyr::mutate_at(vars(meanBodyMass), log10) %>% 
   # log10-transform specified traits (body mass, litter size, generation length)
   dplyr::mutate(gestation = sqrt(gestation_d))
@@ -139,10 +139,6 @@ no_eco <- setdiff(td_mi$species, eco$species)
 # remove missing ecoregion species from trait data
 td_mi <- td_mi %>% 
   filter(!species %in% no_eco)
-
-#for future scenario remove extinct species from eco
-eco <- eco %>% 
-  filter(!species %in% no_species)
 
 # test if the site and trait data sets contain the same number of species? 
 isTRUE(nrow(td_mi) == nrow(distinct(eco, species))) 
@@ -239,7 +235,7 @@ fr_mi <- fun_met(tdf = tb_stur_mi, em = eco_mi_m_pool, fd = fd_mi, e = e_mi_pool
 
 saveRDS(fr_mi, 'FctTradeoffs/MEOW_fr_mi-5traits.Rds')
 
-mean(fr_mi$spp/fr_mi$utc) #1.067 for 5 traits
+mean(fr_mi$spp/fr_mi$utc) #1.046 for 5 traits
 ```
 
 ```{r}
@@ -420,7 +416,7 @@ ggsave(filename = 'MEOW_SPP_map-5traits.png', plot = p_SPP, path = '~/R/thesis/F
 p_Fred_obs <- ggplot(data = FR_MEOW_5, aes(fill = fred)) +
   geom_sf() +
   labs(fill = 'FRed') +
-  scale_fill_viridis_c() +
+  scale_fill_viridis_c(direction = -1) +
   coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
   theme_minimal()
 
@@ -444,7 +440,7 @@ ggsave(filename = 'MEOW_FDisp_map-5traits.png', plot = p_Fdisp_obs, path = '~/R/
 p_Fred_ses <- ggplot(data = SES_MEOW, aes(fill = fred_ses)) +
   geom_sf() +
   labs(fill = 'FRed SES') +
-  scale_fill_viridis_c() +
+  scale_fill_viridis_c(direction = -1) +
   coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
   theme_minimal()
 
@@ -462,7 +458,7 @@ ggsave(filename = 'MEOW_SES_FDisp_map-eco-5traits.png', plot = p_Fdisp_ses, path
        width = 15, height = 10, unit = 'cm')
 
 #utc
-mean(Fct_df$spp/Fct_df$utc) #1.004724
+mean(Fct_df$spp/Fct_df$utc) #1.046383
 ```
 
 #4. Permutation test
@@ -527,22 +523,25 @@ fct_red <- Fct_results %>%
                 p_disp_less = ifelse(fdisp_p_less_test >= 0.95, 1, 0),
                 p_disp_higher = ifelse(fdisp_p_great_test >= 0.95, 1, 0))
 
+fct_tr <- Fct_results %>% 
+  dplyr::filter(fred_ses > 0 & fdisp_ses > 0)
+
 spp_eq <- sum(spp_utc$spp_equal)
-(spp_eq/230)*100 #19.13%
+(spp_eq/230)*100 #24.78%
 spp_high <- sum(spp_utc$spp_higher)
-(spp_high/230)*100 #80.87%
+(spp_high/230)*100 #75.22%
 
 fctred <- sum(fct_red$f_red)
-(fctred/230)*100 #19.13%
+(fctred/230)*100 #24.78%
 
 fred_p <- sum(fct_red$p_less)
-(fred_p/230)*100 #69.57%
+(fred_p/230)*100 #0
 fred_p_high <- sum(fct_red$p_higher)
 (fred_p_high/230)*100 #0
 fdisp_p_l <- sum(fct_red$p_disp_less)
-(fdisp_p_l/230)*100 #9.13%
+(fdisp_p_l/230)*100 #3.04%
 fdisp_p_g <- sum(fct_red$p_disp_higher)
-(fdisp_p_g/230)*100 #7.83%
+(fdisp_p_g/230)*100 #46.96%
 ```
 
 
@@ -557,7 +556,7 @@ points_tradeoff <- ggplot(Fct_df2, aes(x = fred_ses, y = fdisp_ses, col = tradeo
        col = 'Trade-off') +
   theme_minimal()
 points_tradeoff
-ggsave(filename = 'tradeoff_points-5traits-2.png', plot = points_tradeoff, path = '~/R/thesis/FctTradeoffs', 
+ggsave(filename = 'tradeoff_points-5traits.png', plot = points_tradeoff, path = '~/R/thesis/FctTradeoffs', 
        width = 7, height = 7, unit = 'cm')
 tradeoff <- Fct_df2 %>% 
   dplyr::select(c('eco', 'tradeoff'))
@@ -579,7 +578,7 @@ p_tradeoff <- ggplot(data = tradeoff_MEOW, aes(fill = tradeoff)) +
   theme_minimal()
 
 p_tradeoff
-ggsave(filename = 'MEOW_tradeoff_map-eco-5traits-2.png', plot = p_tradeoff, path = '~/R/thesis/FctTradeoffs', 
+ggsave(filename = 'MEOW_tradeoff_map-eco-5traits.png', plot = p_tradeoff, path = '~/R/thesis/FctTradeoffs', 
        width = 15, height = 10, unit = 'cm')
 
 ```
@@ -605,12 +604,13 @@ MPA_p1 <- ggplot() +
   geom_sf(data = FR_MEOW_5, aes(fill = fred)) +
   geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
   labs(fill = 'FRed') +
-  scale_fill_viridis_c() +
+  scale_fill_viridis_c(direction = -1) +
   coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
   theme_minimal()
 
-ggsave(plot = MPA_p1, 'FRed+MPAs3.png', width=15, height=10, units = 'cm')
+ggsave(plot = MPA_p1, 'FRed+MPAs.png', width=15, height=10, units = 'cm')
 
+#FDisp and MPA
 MPA_p2 <- ggplot() +
   geom_sf(data = FR_MEOW_5, aes(fill = fdisp)) +
   geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
@@ -621,17 +621,18 @@ MPA_p2 <- ggplot() +
 
 ggsave(plot = MPA_p2, 'FDisp+MPAs.png', width=15, height=10, units = 'cm')
 
-#FDisp and MPA
+#FRed SES and MPA
 MPA_p3 <- ggplot() +
   geom_sf(data = SES_MEOW, aes(fill = fred_ses)) +
   geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
   labs(fill = 'FRed SES') +
-  scale_fill_viridis_c() +
+  scale_fill_viridis_c(direction = -1) +
   coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
   theme_minimal()
 
 ggsave(plot = MPA_p3, 'FRed_SES+MPAs.png', width=15, height=10, units = 'cm')
 
+#FDisp SES and MPA
 MPA_p4 <- ggplot() +
   geom_sf(data = SES_MEOW, aes(fill = fdisp_ses)) +
   geom_sf(data = MPAgeo, col = 'red', fill = 'red') +
@@ -651,7 +652,7 @@ MPA_p5 <- ggplot() +
   coord_sf(xlim = c(-180,180), ylim = c(-90,90)) +
   theme_minimal()
 
-ggsave(plot = MPA_p5, 'Tradeoff+MPAs2.png', width=15, height=10, units = 'cm')
+ggsave(plot = MPA_p5, 'Tradeoff+MPAs.png', width=15, height=10, units = 'cm')
 
 ```
 
